@@ -15,13 +15,28 @@ SSN entre builds de Windows.
 
 | Comando | Descripción |
 |---|---|
-| `!kage stubs [module]` | Lista los stubs `Nt*` y **marca los hookeados** (prólogo `E9` o `FF 25`). |
 | `!kage nt [module]` | Tabla **`Nt*` → SSN** ordenando los exports por dirección virtual (el índice = SSN). |
 | `!kage ssn <name> [module]` | Resuelve el **SSN** de un `Nt*` concreto por nombre. |
+| `!kage stubs [module]` | Lista stubs `Nt*` y clasifica el prólogo (clean / `jmp` dentro / fuera). |
+| `!kage hooks` | **Detecta hooks inline** en módulos clave, resolviendo el módulo destino (separa forwarders legítimos de sospechosos). |
+| `!kage iat <module>` | Vuelca la **tabla de imports** (dependencias y funciones). |
+| `!kage export <module> <name>` | **Resuelve un export** a su dirección. |
 | `!kage gadget [module]` | Busca gadgets **`syscall;ret`** (`0F 05 C3`) en `.text`. |
+| `!kage find <module> <hex>` | **Busca un patrón de bytes** (hex) en la imagen. |
+| `!kage modules` | Lista los **módulos cargados** con su base. |
 | `!kage help` | Ayuda. |
 
 `module` por defecto: `ntdll`.
+
+## Casos de uso
+
+- **Research de syscalls / SSN**: `!kage nt` y `!kage ssn NtClose` dan la tabla y el SSN real de la
+  build, sin escribir código.
+- **Detección / EDR**: `!kage hooks` y `!kage stubs` muestran qué funciones tienen el prólogo
+  alterado, distinguiendo forwarding legítimo (kernel32→kernelbase) de hooks de terceros.
+- **Análisis de malware**: `!kage iat <mod>` (dependencias), `!kage find <mod> <hex>` (firma de
+  bytes), `!kage modules` (mapa de módulos), `!kage export` (resolución de símbolos).
+- **Exploit / gadget hunting**: `!kage gadget` localiza `syscall;ret` en ntdll.
 
 ## Requisitos
 
