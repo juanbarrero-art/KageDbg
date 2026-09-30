@@ -1,0 +1,11 @@
+bin/
+*.obj
+*.pdb
+*.ilk
+*.dll
+*.lib
+*.exp
+.vs/
+*.user
+Thumbs.db
+Desktop.ini
