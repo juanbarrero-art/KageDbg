@@ -24,6 +24,11 @@ SSN entre builds de Windows.
 | `!kage gadget [module]` | Busca gadgets **`syscall;ret`** (`0F 05 C3`) en `.text`. |
 | `!kage find <module> <hex>` | **Busca un patrón de bytes** (hex) en la imagen. |
 | `!kage modules` | Lista los **módulos cargados** con su base. |
+| `!kage iathooks <module>` | **Detección de IAT hooks** (entradas redirigidas a módulos no-sistema). |
+| `!kage dis <addr\|symbol> [n]` | Desensambla y **anota el SSN** si es un stub de syscall. |
+| `!kage syscall <ssn> [module]` | **Inverso**: SSN → nombre. |
+| `!kage dump <file.csv> [module]` | Exporta la tabla `Nt*` → SSN a **CSV** (baseline por build). |
+| `!kage peb` | Muestra **TEB/PEB** actuales. |
 | `!kage help` | Ayuda. |
 
 `module` por defecto: `ntdll`.

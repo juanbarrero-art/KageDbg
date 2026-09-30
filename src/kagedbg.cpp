@@ -25,6 +25,7 @@ typedef struct _KAGE_EXPORT_ENTRY {
 static IDebugSymbols    *g_Sym = NULL;
 static IDebugControl    *g_Ctrl = NULL;
 static IDebugDataSpaces *g_Dat = NULL;
+static IDebugClient     *g_Client = NULL;
 
 KAGE_EXPORT HRESULT CALLBACK DebugExtensionInitialize(PULONG Version, PULONG Flags);
 KAGE_EXPORT HRESULT CALLBACK DebugExtensionUninitialize(void);
@@ -430,6 +431,131 @@ static void CmdGadget(PCSTR Module)
     Out("kage gadget: %u gadgets syscall;ret en .text.", Found);
 }
 
+static void CmdSyscall(PCSTR SsnStr, PCSTR Module)
+{
+    static KAGE_EXPORT_ENTRY Arr[KAGE_MAX_EXPORTS];
+    ULONG64 Base = 0;
+    ULONG Count;
+    unsigned Ssn;
+    if (SsnStr == NULL || SsnStr[0] == 0) { Out("kage: uso: !kage syscall <ssn> [module]"); return; }
+    Ssn = (unsigned)strtoul(SsnStr, NULL, 0);
+    if (!GetModuleBase(Module, &Base)) { Out("kage: modulo '%s' no encontrado.", Module); return; }
+    Count = CollectExports(Base, Arr, KAGE_MAX_EXPORTS, TRUE);
+    qsort(Arr, Count, sizeof(KAGE_EXPORT_ENTRY), CompareByAddr);
+    if (Ssn < Count) {
+        Out("kage syscall: SSN 0x%03X -> %s (%p)", Ssn, Arr[Ssn].Name, (void *)Arr[Ssn].Addr);
+    } else {
+        Out("kage syscall: SSN 0x%03X fuera de rango (max 0x%X).", Ssn, Count ? Count - 1 : 0);
+    }
+}
+
+static void CmdDump(PCSTR File, PCSTR Module)
+{
+    static KAGE_EXPORT_ENTRY Arr[KAGE_MAX_EXPORTS];
+    ULONG64 Base = 0;
+    ULONG Count, i;
+    FILE *F;
+    if (File == NULL || File[0] == 0) { Out("kage: uso: !kage dump <file.csv> [module]"); return; }
+    if (!GetModuleBase(Module, &Base)) { Out("kage: modulo '%s' no encontrado.", Module); return; }
+    Count = CollectExports(Base, Arr, KAGE_MAX_EXPORTS, TRUE);
+    qsort(Arr, Count, sizeof(KAGE_EXPORT_ENTRY), CompareByAddr);
+    if (fopen_s(&F, File, "w") != 0 || F == NULL) { Out("kage dump: no se pudo abrir %s", File); return; }
+    fprintf(F, "ssn,name,address\n");
+    for (i = 0; i < Count; i++) fprintf(F, "0x%03X,%s,0x%p\n", i, Arr[i].Name, (void *)Arr[i].Addr);
+    fclose(F);
+    Out("kage dump: %u entradas escritas en %s", Count, File);
+}
+
+static void CmdDis(PCSTR AddrStr, PCSTR NStr)
+{
+    ULONG64 Addr, End = 0;
+    ULONG N, i;
+    char Buf[256];
+    BYTE B[8];
+    if (AddrStr == NULL || AddrStr[0] == 0) { Out("kage: uso: !kage dis <addr|symbol> [n]"); return; }
+    if ((AddrStr[0] >= '0' && AddrStr[0] <= '9') || AddrStr[0] == '0') {
+        Addr = _strtoui64(AddrStr, NULL, 0);
+    } else if (g_Sym->GetOffsetByName(AddrStr, &Addr) != S_OK) {
+        Out("kage dis: no se resolvio '%s'.", AddrStr);
+        return;
+    }
+    N = (NStr != NULL && NStr[0]) ? (ULONG)strtoul(NStr, NULL, 0) : 8;
+    if (ReadMem(Addr, B, 8) && B[0] == 0x4C && B[1] == 0x8B && B[2] == 0xD1 && B[3] == 0xB8) {
+        Out("kage dis: (stub syscall) SSN = 0x%X", *(unsigned *)(B + 4));
+    }
+    for (i = 0; i < N; i++) {
+        ULONG Size = 0;
+        if (g_Ctrl->Disassemble(Addr, 0, Buf, sizeof(Buf), &Size, &End) != S_OK) break;
+        Out("  %s", Buf);
+        if (End <= Addr) break;
+        Addr = End;
+    }
+}
+
+static void CmdIatHooks(PCSTR Module)
+{
+    ULONG64 Base = 0;
+    IMAGE_DOS_HEADER Dos;
+    IMAGE_NT_HEADERS Nt;
+    ULONG64 ImpRva;
+    ULONG d = 0, Susp = 0;
+
+    if (!GetModuleBase(Module, &Base)) { Out("kage: modulo '%s' no encontrado.", Module); return; }
+    if (!ReadMem(Base, &Dos, sizeof(Dos)) || !ReadMem(Base + Dos.e_lfanew, &Nt, sizeof(Nt))) {
+        Out("kage: headers ilegibles."); return;
+    }
+    ImpRva = Nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
+    if (ImpRva == 0) { Out("kage iathooks: %s sin imports.", Module); return; }
+    Out("kage iathooks: %s (IAT -> modulo destino; no-sistema = sospechoso)", Module);
+    for (;;) {
+        IMAGE_IMPORT_DESCRIPTOR Desc;
+        ULONG64 Iat, Ilt;
+        ULONG idx = 0;
+        if (!ReadMem(Base + ImpRva + d * sizeof(Desc), &Desc, sizeof(Desc))) break;
+        if (Desc.Name == 0 && Desc.FirstThunk == 0) break;
+        Iat = Base + Desc.FirstThunk;
+        Ilt = Base + (Desc.OriginalFirstThunk ? Desc.OriginalFirstThunk : Desc.FirstThunk);
+        for (;;) {
+            ULONG64 IltE = 0, IatV = 0;
+            char Mod[MAX_PATH];
+            if (!ReadMem(Ilt, &IltE, 8) || IltE == 0) break;
+            if (!ReadMem(Iat + idx * 8, &IatV, 8)) break;
+            ModuleOfAddr(IatV, Mod, sizeof(Mod));
+            if (!IsSystemModuleName(Mod)) {
+                Susp++;
+                Out("  IAT hook? [%s] idx=%u -> %p (%s)", Module, idx, (void *)IatV, Mod);
+            }
+            idx++;
+            Ilt += 8;
+            if (idx > 4096) break;
+        }
+        d++;
+        if (d > 256) break;
+    }
+    Out("kage iathooks: %u entradas sospechosas en %s", Susp, Module);
+}
+
+static void CmdPeb(void)
+{
+    IDebugRegisters *Reg = NULL;
+    ULONG64 Teb = 0, Peb = 0;
+    if (g_Client == NULL ||
+        g_Client->QueryInterface(__uuidof(IDebugRegisters), (void **)&Reg) != S_OK) {
+        Out("kage: registros no disponibles."); return;
+    }
+    {
+        ULONG Idx = 0;
+        DEBUG_VALUE Val;
+        if (Reg->GetIndexByName("$teb", &Idx) != S_OK || Reg->GetValue(Idx, &Val) != S_OK) {
+            Out("kage: $teb no disponible."); Reg->Release(); return;
+        }
+        Teb = Val.I64;
+    }
+    ReadMem(Teb + 0x60, &Peb, 8);
+    Out("kage: TEB=%p  PEB=%p", (void *)Teb, (void *)Peb);
+    Reg->Release();
+}
+
 static void CmdHelp(void)
 {
     Out("KageDbg — research debugger extension");
@@ -442,6 +568,11 @@ static void CmdHelp(void)
     Out("  !kage gadget [mod]         : gadgets syscall;ret en .text");
     Out("  !kage find <mod> <hex>     : buscar patron de bytes");
     Out("  !kage modules              : modulos cargados");
+    Out("  !kage iathooks <mod>       : deteccion de IAT hooks");
+    Out("  !kage dis <addr> [n]       : desensambla (anota SSN si es un stub)");
+    Out("  !kage syscall <ssn> [mod]  : SSN -> nombre (inverso)");
+    Out("  !kage dump <file.csv> [mod]: exporta la tabla Nt*->SSN a CSV");
+    Out("  !kage peb                  : TEB/PEB actuales");
     Out("  (module por defecto: ntdll)");
 }
 
@@ -467,6 +598,7 @@ KAGE_EXPORT HRESULT CALLBACK kage(PDEBUG_CLIENT Client, PCSTR Args)
         if (g_Dat) g_Dat->Release();
         return E_FAIL;
     }
+    g_Client = Client;
     if (Args != NULL) {
         n = sscanf_s(Args, "%31s %127s %127s", Cmd, (unsigned)sizeof(Cmd),
                      A1, (unsigned)sizeof(A1), A2, (unsigned)sizeof(A2));
@@ -482,9 +614,14 @@ KAGE_EXPORT HRESULT CALLBACK kage(PDEBUG_CLIENT Client, PCSTR Args)
     else if (_stricmp(Cmd, "gadget") == 0) CmdGadget((n >= 2 && A1[0]) ? A1 : "ntdll");
     else if (_stricmp(Cmd, "find") == 0) CmdFind(A1, A2);
     else if (_stricmp(Cmd, "modules") == 0) CmdModules();
+    else if (_stricmp(Cmd, "iathooks") == 0) CmdIatHooks((n >= 2 && A1[0]) ? A1 : "ntdll");
+    else if (_stricmp(Cmd, "dis") == 0) CmdDis(A1, A2);
+    else if (_stricmp(Cmd, "syscall") == 0) CmdSyscall(A1, (n >= 3 && A2[0]) ? A2 : "ntdll");
+    else if (_stricmp(Cmd, "dump") == 0) CmdDump(A1, (n >= 3 && A2[0]) ? A2 : "ntdll");
+    else if (_stricmp(Cmd, "peb") == 0) CmdPeb();
     else CmdHelp();
 
     g_Sym->Release(); g_Ctrl->Release(); g_Dat->Release();
-    g_Sym = NULL; g_Ctrl = NULL; g_Dat = NULL;
+    g_Sym = NULL; g_Ctrl = NULL; g_Dat = NULL; g_Client = NULL;
     return S_OK;
 }
